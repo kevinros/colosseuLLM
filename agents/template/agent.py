@@ -13,6 +13,7 @@ import datetime
 import asyncio
 from fastapi import FastAPI, Body
 from contextlib import asynccontextmanager
+import json
 
 # ============================================================================
 # USER CUSTOMIZATION ZONE - Define Your Agent's Strategy Here
@@ -25,13 +26,20 @@ You are a strategic agent in a competitive Linux environment. You will be given 
 You are in this linux environment with another agent, who is going to prevent you from reaching the goal.
 You DO NOT want to lose.
 
-Your toolset is the command line. You have full access to everything.
+Your toolset is the bash command line. You have full access to everything.
 You interact with this environment by responding with a bash command. 
 
 Be very brief and quick in your responses. Time matters!
 
-IMPORTANT: Respond with ONLY a bash command. No explanation, no markdown formatting.
+Analyze the current state, decide on a tactic, and provide the command.
+
+Respond with ONLY a JSON object in this exact format:
+{"thought": "your reasoning", "command": "bash_command"}
+
+Do not include any text before or after the JSON.
 """
+
+AGENT_INFORMATION = f"Your AGENT_NAME is {os.getenv('AGENT_NAME')}"
 
 # Optionally, add some tactics:
 """ 
@@ -81,7 +89,7 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     
     # Build your system prompt however you want
-    system_prompt = f"{game_rules}\n\n{CUSTOM_STRATEGY}"
+    system_prompt = f"{game_rules}\n\n{CUSTOM_STRATEGY}\n\n{AGENT_INFORMATION}"
     
     # Manage conversation history YOUR way
     # Example: Keep last 10 exchanges
@@ -99,6 +107,9 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
     response = await asyncio.to_thread(
         client.models.generate_content,
         model="gemini-2.0-flash",
+        config={
+            "response_mime_type": "application/json",
+        },
         contents=[
             {"role": "user", "parts": [{"text": system_prompt}]},
             *[
@@ -107,14 +118,32 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
             ]
         ]
     )
-    
-    cmd = response.text.strip().replace("```bash", "").replace("```", "").strip()
-    
-    # Store the command in YOUR history format
-    user_state["conversation_history"].append({
-        "role": "assistant",
-        "content": cmd
-    })
+        
+    try:
+        # Parse the structured response
+        res_data = json.loads(response.text)
+        thought = res_data.get("thought", "No reasoning provided.")
+        cmd = res_data.get("command", "").strip()
+
+        # Log and update history normally
+        log_to_file(f"RESPONSE: {response.text}")
+
+        user_state["conversation_history"].append({
+            "role": "assistant",
+            "content": f"Thought: {thought}\nCommand: {cmd}"
+        })
+        
+    except json.JSONDecodeError:
+        error_info = f"SYSTEM ERROR: Your last response was not valid JSON. Raw response was: {response.text}"
+        log_to_file(error_info)
+        
+        # Tell the agent it failed so it can try again next loop
+        user_state["conversation_history"].append({
+            "role": "user", 
+            "content": f"{error_info}\nPlease ensure your next response is ONLY valid JSON."
+        })
+        
+        cmd = "ls" # Fallback to a harmless command
     
     return cmd
 
@@ -230,10 +259,15 @@ async def start_loop():
 @app.post("/broadcast")
 async def handle_broadcast(data: dict = Body(...)):
     """REQUIRED ENDPOINT: Receives game events (key unlocked, etc.)"""
-    global key_is_open
-    if data.get("status") == "OPEN":
+    global key_is_open, game_started
+    status = data.get("status")
+    if status == "OPEN":
         key_is_open = True
         print(f"[{NAME}] ALERT: KEY IS ACCESSIBLE!")
+    elif status == "FINISHED" or status == "OVER":
+        game_started = False
+        print(f"[{NAME}] RECEIVED GAME OVER SIGNAL. SHUTTING DOWN LOOP.")
+        log_to_file("BROADCAST: Game Finished. Agent loop stopped.")
     return {"received": True}
 
 
