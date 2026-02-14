@@ -11,4 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN mkdir -p /arena && chmod 1777 /arena
+
 CMD ["python", "main.py"] 

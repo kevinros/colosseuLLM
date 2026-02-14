@@ -35,7 +35,7 @@ Analyze the current state, decide on a tactic, and provide the command.
 Respond with ONLY a JSON object in this exact format:
 {"thought": "your reasoning", "command": "bash_command"}
 
-Do not include any text before or after the JSON.
+Do not include any text before or after the JSON. Try to keep your bash commands simple and well-defined. Long ones tend to fail.
 """
 
 AGENT_INFORMATION = f"Your AGENT_NAME is {os.getenv('AGENT_NAME')}"
@@ -86,66 +86,60 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
     from google import genai
     
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    
-    # Build your system prompt however you want
     system_prompt = f"{game_rules}\n\n{CUSTOM_STRATEGY}\n\n{AGENT_INFORMATION}"
     
-    # Manage conversation history YOUR way
-    # Example: Keep last 10 exchanges
     if len(user_state["conversation_history"]) > 20:
         user_state["conversation_history"] = user_state["conversation_history"][-20:]
     
-    # Add key status update if needed
-    if key_is_open and not any("KEY IS OPEN" in msg.get("content", "") for msg in user_state["conversation_history"]):
+    if key_is_open and not any("CHALLENGE IS LIVE" in msg.get("content", "") for msg in user_state["conversation_history"]):
         user_state["conversation_history"].append({
             "role": "user",
-            "content": "THE KEY IS NOW UNLOCKED! Win by reaching this url: http://rules:8000/get_key?agent_name=" + os.getenv("AGENT_NAME")
+            "content": f"THE CHALLENGE IS LIVE!\nTo win: 1. Read /arena/challenge.txt, 2. Write to /arena/{os.getenv('AGENT_NAME')}/solution.txt, 4. POST claim."
         })
     
-    # Call LLM with YOUR conversation structure
     response = await asyncio.to_thread(
         client.models.generate_content,
         model="gemini-2.0-flash",
-        config={
-            "response_mime_type": "application/json",
-        },
+        config={"response_mime_type": "application/json"},
         contents=[
             {"role": "user", "parts": [{"text": system_prompt}]},
-            *[
-                {"role": msg["role"], "parts": [{"text": msg["content"]}]}
-                for msg in user_state["conversation_history"]
-            ]
+            *[{"role": msg["role"], "parts": [{"text": msg["content"]}]} for msg in user_state["conversation_history"]]
         ]
     )
+
+    response_text = response.text.strip()
+    
+    # Handle potential markdown fences if the LLM ignores the mime_type hint
+    if response_text.startswith("```"):
+        # This regex or split logic cleans up "```json\n{...}\n```"
+        lines = response_text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        response_text = "\n".join(lines).strip()
         
     try:
-        # Parse the structured response
-        res_data = json.loads(response.text)
-        thought = res_data.get("thought", "No reasoning provided.")
-        cmd = res_data.get("command", "").strip()
+        res_data = json.loads(response_text)
+        thought = res_data.get("thought", "No reasoning.")
+        cmd = res_data.get("command", "ls").strip()
 
-        # Log and update history normally
-        pretty_json = json.dumps(res_data, indent=4)
-        log_to_file(f"RESPONSE:\n {pretty_json}")
+        log_to_file(f"RESPONSE:\n{json.dumps(res_data, indent=4)}")
 
         user_state["conversation_history"].append({
             "role": "assistant",
             "content": f"Thought: {thought}\nCommand: {cmd}"
         })
-        
+        return cmd
+
     except json.JSONDecodeError:
-        error_info = f"SYSTEM ERROR: Your last response was not valid JSON. Raw response was: {response.text}"
+        error_info = f"SYSTEM ERROR: Invalid JSON. Raw: {response_text[:100]}"
         log_to_file(error_info)
-        
-        # Tell the agent it failed so it can try again next loop
         user_state["conversation_history"].append({
             "role": "user", 
-            "content": f"{error_info}\nPlease ensure your next response is ONLY valid JSON."
+            "content": f"{error_info}\nRespond ONLY with valid JSON."
         })
-        
-        cmd = "ls" # Fallback to a harmless command
-    
-    return cmd
+        return "ls" # Safe fallback
 
 
 async def process_result(stdout: str, stderr: str, exit_code: int):
