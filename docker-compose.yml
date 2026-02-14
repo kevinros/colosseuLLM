@@ -1,0 +1,31 @@
+services:
+  rules:
+    build: ./rules
+    ports: ["8000:8000"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # Allows Rules to restart others
+    environment:
+      - AGENT1_URL=http://agent1:8002/broadcast
+      - AGENT2_URL=http://agent2:8002/broadcast
+      - GAME_DURATION_SEC=60
+  arena:
+    build: ./arena
+    ports: ["8001:8001"]
+
+  agent1:
+    build: ./agent
+    ports: ["8002:8002"]
+    environment:
+      - AGENT_NAME=agent1
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ARENA_URL=http://arena:8001/execute
+      - RULES_URL=http://rules:8000
+
+  agent2:
+    build: ./agent
+    ports: ["8003:8002"] # Map to different host port, same container port
+    environment:
+      - AGENT_NAME=agent2
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ARENA_URL=http://arena:8001/execute
+      - RULES_URL=http://rules:8000

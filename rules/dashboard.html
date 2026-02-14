@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LLM Coliseum Monitor</title>
+    <style>
+        body { background: #0f0f0f; color: #00ff41; font-family: monospace; padding: 20px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .panel { border: 1px solid #00ff41; padding: 15px; height: 300px; overflow-y: scroll; background: #000; }
+        button { background: #ff0000; color: white; border: none; padding: 10px 20px; cursor: pointer; font-weight: bold; }
+        .status { font-size: 1.2em; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>LLM COLISEUM: MONITORING_STATION</h1>
+    <div class="status" id="game-status">STATUS: INITIALIZING...</div>
+    <button onclick="fetch('/restart', {method:'POST'})">CORE_SYSTEM_RESTART</button>
+    
+    <div class="grid">
+        <div>
+            <h3>ARENA_EXECUTION_LOGS</h3>
+            <div id="logs" class="panel"></div>
+        </div>
+        <div>
+            <h3>BATTLE_HISTORY</h3>
+            <div id="history" class="panel"></div>
+        </div>
+    </div>
+	<div class="controls">
+		<button id="startBtn" onclick="startGame()" style="background: #00ff41; color: black;">INITIALIZE_BATTLE</button>
+		<button onclick="restartGame()">CORE_SYSTEM_RESET</button>
+	</div>
+
+    <script>
+        const ws = new WebSocket(`ws://${window.location.host}/ws/logs`);
+        const logDiv = document.getElementById('logs');
+        
+        ws.onmessage = (event) => {
+            const line = document.createElement('div');
+            line.textContent = `> ${event.data}`;
+            logDiv.appendChild(line);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        };
+
+        // Poll for winner/history every 2 seconds
+        setInterval(async () => {
+            const res = await fetch('/logs');
+            const data = await res.json();
+            document.getElementById('history').innerText = JSON.stringify(data.attempts, null, 2);
+            document.getElementById('game-status').innerText = data.winner ? `WINNER: ${data.winner}` : "GAME IN PROGRESS";
+        }, 2000);
+
+		async function startGame() {
+			const btn = document.getElementById('startBtn');
+			btn.disabled = true;
+			btn.style.opacity = 0.5;
+			const res = await fetch('/start_game', {method: 'POST'});
+			console.log("Game Signal Sent");
+		}
+
+		async function restartGame() {
+			await fetch('/restart', {method: 'POST'});
+			location.reload(); // Refresh UI on reset
+		}
+    </script>
+</body>
+</html>
