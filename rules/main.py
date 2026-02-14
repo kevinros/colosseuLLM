@@ -116,9 +116,9 @@ def resolve_winner():
     if len(claims) == 1:
         winner = list(claims)[0]
     elif len(claims) > 1:
-        winner = "NONE (DRAW)"
+        winner = "NONE (Both Accessed within Time)"
     else:
-        winner = "NONE (NO ACCESS)"
+        winner = "NONE (Neither Accessed within Time)"
     print(f"RULES: Game Over. Result: {winner}")
 
 async def broadcast_final_results():
