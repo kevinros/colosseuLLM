@@ -94,7 +94,7 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
     if key_is_open and not any("CHALLENGE IS LIVE" in msg.get("content", "") for msg in user_state["conversation_history"]):
         user_state["conversation_history"].append({
             "role": "user",
-            "content": f"THE CHALLENGE IS LIVE!\nTo win: 1. Read /arena/challenge.txt, 2. Write to /arena/{os.getenv('AGENT_NAME')}/solution.txt, 4. POST claim."
+            "content": f"""THE CHALLENGE IS LIVE! The file /arena/challenge.txt now exists."""
         })
     
     response = await asyncio.to_thread(
