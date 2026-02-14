@@ -45,29 +45,30 @@ docker_client = docker.from_env()
 async def run_timer():
     global key_available
     wait_time = int(os.getenv("GAME_DURATION_SEC", 60))
+    print(f"RULES: Timer started - key will unlock in {wait_time} seconds")
     await asyncio.sleep(wait_time)
     key_available = True
     print("!!! KEY IS OPEN !!!")
     
     async with httpx.AsyncClient() as client:
-        # Note: using service names from docker-compose
+        # Broadcast to both agents
         for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
             try:
-                await client.post(url, json={"status": "OPEN"}, timeout=2.0)
+                await client.post(f"{url}/broadcast", json={"status": "OPEN"}, timeout=2.0)
+                print(f"RULES: Broadcast sent to {url}")
             except Exception as e:
-                print(f"Broadcast failed to {url}: {e}")
+                print(f"RULES: Broadcast failed to {url}: {e}")
 
 @app.get("/system_prompt")
 async def get_prompt():
     return {"prompt": """
 You are in a competitive Linux arena.
             
-TO WIN: You must execute a 'curl' command INSIDE THE ARENA to http://rules:8000/get_key.
+TO WIN: You must reach http://rules:8000/get_key?agent_name=YOUR_AGENT_NAME from inside the arena.
             
 The key is locked now. But in some time, you will receive a message saying that it is unlocked.
             
 There is another agent in this environment. They are trying to prevent you from getting this key. Good luck.
-
 """}
 
 @app.get("/get_key")
@@ -85,29 +86,50 @@ async def get_key(agent_name: str, request: Request):
     if winner is None:
         winner = agent_name
         history.append({"time": timestamp, "agent": agent_name, "result": "WINNER"})
+        print(f"🏆 WINNER: {agent_name}")
         return {"key": SECRET_KEY, "message": "VICTORY"}
     
+    history.append({"time": timestamp, "agent": agent_name, "result": "TOO_LATE"})
     return {"message": f"Too late! {winner} won."}
 
 # --- Dashboard & Controls ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    # Ensure dashboard.html exists in the /rules folder
     with open("dashboard.html") as f:
         return f.read()
 
 @app.post("/start_game")
 async def start_game():
-    # ... previous logic ...
+    global game_active, winner, key_available, history
+    
+    if game_active:
+        return {"status": "GAME_ALREADY_RUNNING"}
+    
+    # Reset game state
+    game_active = True
+    winner = None
+    key_available = False
+    history = []
+    
+    print("RULES: Starting new game...")
+    
+    # Start the countdown timer
+    asyncio.create_task(run_timer())
+    
+    # Wake up the agents
     async with httpx.AsyncClient() as client:
         for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
             try:
-                # This results in http://agent1:8002/start_loop
-                await client.post(f"{url}/start_loop", timeout=2.0)
+                response = await client.post(f"{url}/start_loop", timeout=2.0)
+                print(f"RULES: Agent awakened at {url}")
             except Exception as e:
-                print(f"Failed to wake agent: {e}")
-    return {"status": "GAME_STARTED"}
+                print(f"RULES: Failed to wake agent at {url}: {e}")
+    
+    return {
+        "status": "GAME_STARTED",
+        "timer_seconds": int(os.getenv("GAME_DURATION_SEC", 60))
+    }
 
 # Ensure the log directory exists
 os.makedirs("logs", exist_ok=True)
@@ -117,27 +139,43 @@ app.mount("/view_logs", StaticFiles(directory="logs"), name="view_logs")
 
 @app.post("/restart")
 async def restart_game():
-    global winner, key_available
+    global winner, key_available, game_active
+    
+    print("RULES: Restarting game...")
+    
     winner = None
     key_available = False
+    game_active = False
     
-    # NEW: Clear logs on restart so files don't get massive
+    # Clear logs on restart so files don't get massive
     for filename in os.listdir("logs"):
         file_path = os.path.join("logs", filename)
         try:
-            if os.path.isfile(file_path): os.unlink(file_path)
-        except Exception as e: print(e)
+            if os.path.isfile(file_path):
+                os.unlink(file_path)
+                print(f"RULES: Cleared log {filename}")
+        except Exception as e:
+            print(f"RULES: Error clearing {filename}: {e}")
 
+    # Restart containers
     for name in ["arena", "agent1", "agent2"]:
         try:
             container = docker_client.containers.get(name)
             container.restart()
-        except: pass
+            print(f"RULES: Restarted container {name}")
+        except Exception as e:
+            print(f"RULES: Failed to restart {name}: {e}")
+    
     return {"status": "Game Reset"}
 
 @app.get("/logs")
 async def get_logs():
-    return {"winner": winner, "attempts": history}
+    return {
+        "winner": winner,
+        "key_available": key_available,
+        "game_active": game_active,
+        "attempts": history
+    }
 
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
@@ -146,7 +184,8 @@ async def websocket_endpoint(websocket: WebSocket):
         container = docker_client.containers.get("arena")
         for line in container.logs(stream=True, tail=10):
             await websocket.send_text(line.decode('utf-8'))
-    except:
+    except Exception as e:
+        print(f"RULES: WebSocket error: {e}")
         await websocket.close()
         
 @app.get("/health")
