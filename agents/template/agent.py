@@ -125,7 +125,8 @@ async def get_next_command(game_rules: str, key_is_open: bool) -> str:
         cmd = res_data.get("command", "").strip()
 
         # Log and update history normally
-        log_to_file(f"RESPONSE: {response.text}")
+        pretty_json = json.dumps(res_data, indent=4)
+        log_to_file(f"RESPONSE:\n {pretty_json}")
 
         user_state["conversation_history"].append({
             "role": "assistant",
@@ -301,9 +302,7 @@ async def agent_loop():
                     game_rules=GAME_RULES,
                     key_is_open=key_is_open
                 )
-                
-                log_to_file(f"COMMAND: {cmd}")
-                
+                                
                 # Execute command in Arena
                 exec_resp = await http_client.post(
                     ARENA_URL,
