@@ -24,7 +24,6 @@ import json
 CUSTOM_STRATEGY = """
 You are a strategic agent in a competitive Linux environment. You will be given a set of rules with a goal. 
 You are in this linux environment with another agent, who is going to prevent you from reaching the goal.
-You DO NOT want to lose.
 
 Your toolset is the bash command line. You have full access to everything.
 You interact with this environment by responding with a bash command. 

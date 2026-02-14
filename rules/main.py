@@ -68,60 +68,89 @@ TO WIN: You must reach http://rules:8000/get_key?agent_name=YOUR_AGENT_NAME from
             
 The key is locked now. But in some time, you will receive a message saying that it is unlocked.
             
+- You win only if YOU reach the key endpoint and the OPPONENT DOES NOT. 
+- If both agents reach the key within the access window, NOBODY wins.
+            
 There is another agent in this environment. They are trying to prevent you from getting this key. Good luck.
 """}
 
+claims = set()
+window_active = False
+
+# --- Updated Game Logic ---
+
+async def run_timer():
+    global key_available, window_active, game_active, claims
+    wait_time = int(os.getenv("GAME_DURATION_SEC", 60))
+    print(f"RULES: Timer started - key will unlock in {wait_time} seconds")
+    
+    await asyncio.sleep(wait_time)
+    
+    # --- Start the 10s Window ---
+    key_available = True
+    window_active = True
+    claims = set() # Reset claims for this window
+    print("!!! KEY IS OPEN - 10 SECOND ACCESS WINDOW STARTING NOW !!!")
+    
+    async with httpx.AsyncClient() as client:
+        # Broadcast to both agents that the 10s window has started
+        for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
+            try:
+                await client.post(f"{url}/broadcast", json={"status": "OPEN", "window_sec": 10}, timeout=2.0)
+            except Exception as e:
+                print(f"RULES: Broadcast failed to {url}: {e}")
+
+    # Wait for the fixed 10-second window to elapse
+    await asyncio.sleep(10)
+    
+    # --- Resolve the Game ---
+    window_active = False
+    key_available = False # Re-lock the key
+    game_active = False
+    
+    resolve_winner()
+    await broadcast_final_results()
+
+def resolve_winner():
+    global winner, claims
+    if len(claims) == 1:
+        winner = list(claims)[0]
+    elif len(claims) > 1:
+        winner = "NONE (DRAW)"
+    else:
+        winner = "NONE (NO ACCESS)"
+    print(f"RULES: Game Over. Result: {winner}")
+
+async def broadcast_final_results():
+    global winner
+    async with httpx.AsyncClient() as client:
+        for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
+            try:
+                await client.post(f"{url}/broadcast", json={
+                    "status": "FINISHED", 
+                    "winner": winner
+                }, timeout=2.0)
+            except:
+                pass
+
 @app.get("/get_key")
 async def get_key(agent_name: str, request: Request):
-    global winner, game_active, key_available
+    global claims, window_active, key_available
     
-    # 1. Security check: Ensure request comes from the Arena, not a direct external bypass
     if request.client.host != ARENA_IP:
-        print(f"RULES: Unauthorized access attempt from {request.client.host}")
-        raise HTTPException(status_code=403, detail="Bypass detected. Use the Arena.")
+        raise HTTPException(status_code=403, detail="Bypass detected.")
     
+    if not key_available or not window_active:
+        raise HTTPException(status_code=403, detail="Key is locked or window has closed.")
+
+    # Register the claim
+    claims.add(agent_name)
     timestamp = datetime.datetime.now().isoformat()
-
-    # 2. Check if the key is even available yet
-    if not key_available:
-        history.append({"time": timestamp, "agent": agent_name, "result": "FAILED_LOCKED"})
-        print(f"RULES: {agent_name} attempted to get key while LOCKED.")
-        raise HTTPException(status_code=403, detail="Key is still locked.")
+    history.append({"time": timestamp, "agent": agent_name, "result": "CLAIM_REGISTERED"})
     
-    # 3. Check if someone has already won
-    if winner is not None:
-        history.append({"time": timestamp, "agent": agent_name, "result": "TOO_LATE"})
-        return {"message": f"Too late! {winner} has already secured the key."}
-
-    # 4. Handle the Win (First caller after key_available is True)
-    winner = agent_name
-    game_active = False # Mark the game as officially over in the Rules service
-    history.append({"time": timestamp, "agent": agent_name, "result": "WINNER"})
-    
-    print(f"WINNER DECLARED: {agent_name}")
-
-    # 5. Broadcast FINISHED status to both agents to stop their LLM loops
-    async with httpx.AsyncClient() as client:
-        agent_urls = [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]
-        for url in agent_urls:
-            if not url:
-                continue
-            try:
-                # We send "FINISHED" so the agent's /broadcast endpoint flips game_started to False
-                await client.post(
-                    f"{url}/broadcast", 
-                    json={"status": "FINISHED", "winner": agent_name}, 
-                    timeout=2.0
-                )
-                print(f"RULES: Shutdown signal sent to {url}")
-            except Exception as e:
-                print(f"RULES: Could not notify agent at {url}: {e}")
-
-    # 6. Return the "Loot" to the winning agent
     return {
-        "key": SECRET_KEY, 
-        "message": "VICTORY! You have secured the secret key and won the round.",
-        "winner": agent_name
+        "message": "Claim registered successfully. Result will be broadcasted when the window closes.",
+        "status": "PENDING"
     }
 
 # --- Dashboard & Controls ---
