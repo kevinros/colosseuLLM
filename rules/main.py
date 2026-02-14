@@ -130,3 +130,9 @@ async def websocket_endpoint(websocket: WebSocket):
     container = client.containers.get("arena")
     for line in container.logs(stream=True, tail=10):
         await websocket.send_text(line.decode('utf-8'))
+        
+
+# Ensure uvicorn is actually called at the bottom
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

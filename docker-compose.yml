@@ -8,6 +8,11 @@ services:
       - AGENT1_URL=http://agent1:8002/broadcast
       - AGENT2_URL=http://agent2:8002/broadcast
       - GAME_DURATION_SEC=60
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/system_prompt"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
   arena:
     build: ./arena
     ports: ["8001:8001"]
@@ -20,6 +25,9 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ARENA_URL=http://arena:8001/execute
       - RULES_URL=http://rules:8000
+    depends_on:
+      rules:
+        condition: service_healthy
 
   agent2:
     build: ./agent
@@ -29,3 +37,6 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ARENA_URL=http://arena:8001/execute
       - RULES_URL=http://rules:8000
+    depends_on:
+      rules:
+        condition: service_healthy
