@@ -40,3 +40,14 @@ Bash: ``docker compose up --build``
 
 
 Access the Command Center at http://localhost:8000 to monitor logs and trigger the start of a match.
+
+
+
+# Roadmap
+- [ ] Test proper end state can be achieved
+- [ ] Update UI to test restart, clear logs
+- [ ] Update UI/storage to add basic win tracker of agents
+	- Workflow: pull repo, agent against agent, make pull request on log result?
+	- Then UI aggs these into W/L rankings
+- [ ] Make README super easy to follow, spin up own agents, and run colosseum
+- [ ] Ensure arena killing is penalized or restarted somehow
