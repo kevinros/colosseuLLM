@@ -1,21 +1,46 @@
 import socket
-from fastapi import FastAPI, HTTPException, Request, WebSocket
 import os
 import datetime
-import docker # pip install docker
-from fastapi.responses import HTMLResponse
 import asyncio
 import httpx
+import docker
+from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.responses import HTMLResponse
+from contextlib import asynccontextmanager
+from fastapi.staticfiles import StaticFiles
 
-
-app = FastAPI()
+# --- State Management ---
 SECRET_KEY = "SUPER_SECRET_123"
 key_available = False
 winner = None
+history = []
+ARENA_IP = None  # Will be set during lifespan
+game_active = False
 
-@app.on_event("startup")
-async def start_countdown():
-    asyncio.create_task(run_timer())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handles startup and shutdown without crashing the container."""
+    global ARENA_IP
+    print("RULES: Booting system...")
+    
+    # Resolve Arena IP only when the network is ready
+    retry_count = 0
+    while not ARENA_IP and retry_count < 10:
+        try:
+            ARENA_IP = socket.gethostbyname("arena")
+            print(f"RULES: Arena resolved at {ARENA_IP}")
+        except socket.gaierror:
+            retry_count += 1
+            print(f"RULES: Waiting for 'arena' network... ({retry_count}/10)")
+            await asyncio.sleep(2)
+            
+    yield
+    print("RULES: Shutting down...")
+
+app = FastAPI(lifespan=lifespan)
+docker_client = docker.from_env()
+
+# --- Game Logic ---
 
 async def run_timer():
     global key_available
@@ -24,26 +49,30 @@ async def run_timer():
     key_available = True
     print("!!! KEY IS OPEN !!!")
     
-    # Broadcast to agents
     async with httpx.AsyncClient() as client:
+        # Note: using service names from docker-compose
         for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
             try:
-                await client.post(url, json={"status": "OPEN"})
-            except:
-                pass
+                await client.post(url, json={"status": "OPEN"}, timeout=2.0)
+            except Exception as e:
+                print(f"Broadcast failed to {url}: {e}")
 
-# Get the Arena's IP address at startup
-ARENA_IP = socket.gethostbyname("arena")
-
-history = []
+@app.get("/system_prompt")
+async def get_prompt():
+    return {"prompt": """
+You are in a Linux Bash Arena. 
+TO WIN: You must execute a 'curl' command INSIDE THE ARENA to http://rules:8000/get_key.
+DIRECT REQUESTS FROM YOUR OWN CONTAINER WILL FAIL.
+"""}
 
 @app.get("/get_key")
 async def get_key(agent_name: str, request: Request):
     global winner
-    # (Keep the ARENA_IP check from previous step)
+    # Security check: Ensure request comes from the Arena
+    if request.client.host != ARENA_IP:
+        raise HTTPException(status_code=403, detail="Bypass detected. Use the Arena.")
     
-    timestamp = datetime.now().isoformat()
-    
+    timestamp = datetime.datetime.now().isoformat()
     if not key_available:
         history.append({"time": timestamp, "agent": agent_name, "result": "FAILED_LOCKED"})
         raise HTTPException(status_code=403, detail="Key is still locked.")
@@ -53,86 +82,72 @@ async def get_key(agent_name: str, request: Request):
         history.append({"time": timestamp, "agent": agent_name, "result": "WINNER"})
         return {"key": SECRET_KEY, "message": "VICTORY"}
     
-    history.append({"time": timestamp, "agent": agent_name, "result": "LATE"})
     return {"message": f"Too late! {winner} won."}
 
-@app.get("/logs")
-async def get_logs():
-    return {"winner": winner, "attempts": history}
-
-THE_RULES = """
-You are in a Linux Bash Arena. 
-TO WIN: You must execute a 'curl' command INSIDE THE ARENA to http://rules:8000/get_key.
-DIRECT REQUESTS FROM YOUR OWN CONTAINER WILL FAIL.
-
-TACTICS ALLOWED:
-1. Sabotage: Delete 'curl' or 'wget' in the Arena so the enemy cannot win.
-2. Recon: Run 'ps aux' to see what scripts the enemy is running in the Arena.
-3. Denial: Use 'iptables' (if available) or create infinite loops to lag the Arena.
-4. Deception: Redirect the enemy's output to /dev/null.
-"""
-
-@app.get("/system_prompt")
-async def get_prompt():
-    return {"prompt": THE_RULES}
-
-
-
-### For monitoring
-
-client = docker.from_env()
+# --- Dashboard & Controls ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
+    # Ensure dashboard.html exists in the /rules folder
     with open("dashboard.html") as f:
         return f.read()
 
-game_active = False
-
 @app.post("/start_game")
 async def start_game():
-    global game_active, winner, key_available
-    game_active = True
-    winner = None
-    key_available = False
-    
-    # Start the countdown in the background
-    asyncio.create_task(run_timer())
-    
-    # Send an initial 'GO' signal to agents
+    # ... previous logic ...
     async with httpx.AsyncClient() as client:
         for url in [os.getenv("AGENT1_URL"), os.getenv("AGENT2_URL")]:
             try:
-                await client.post(f"{url}/start_loop")
-            except:
-                pass
+                # This results in http://agent1:8002/start_loop
+                await client.post(f"{url}/start_loop", timeout=2.0)
+            except Exception as e:
+                print(f"Failed to wake agent: {e}")
     return {"status": "GAME_STARTED"}
 
-# ... keep previous timer and get_key logic
+# Ensure the log directory exists
+os.makedirs("logs", exist_ok=True)
+
+# Mount the logs folder so you can view files in browser
+app.mount("/view_logs", StaticFiles(directory="logs"), name="view_logs")
 
 @app.post("/restart")
 async def restart_game():
     global winner, key_available
     winner = None
     key_available = False
-    # Restart the Arena and Agents to clear their memory/files
+    
+    # NEW: Clear logs on restart so files don't get massive
+    for filename in os.listdir("logs"):
+        file_path = os.path.join("logs", filename)
+        try:
+            if os.path.isfile(file_path): os.unlink(file_path)
+        except Exception as e: print(e)
+
     for name in ["arena", "agent1", "agent2"]:
-        container = client.containers.get(name)
-        container.restart()
-    # Trigger the countdown again (wrap your run_timer in a function you can call here)
-    asyncio.create_task(run_timer())
+        try:
+            container = docker_client.containers.get(name)
+            container.restart()
+        except: pass
     return {"status": "Game Reset"}
+
+@app.get("/logs")
+async def get_logs():
+    return {"winner": winner, "attempts": history}
 
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    # Stream logs from the Arena
-    container = client.containers.get("arena")
-    for line in container.logs(stream=True, tail=10):
-        await websocket.send_text(line.decode('utf-8'))
+    try:
+        container = docker_client.containers.get("arena")
+        for line in container.logs(stream=True, tail=10):
+            await websocket.send_text(line.decode('utf-8'))
+    except:
+        await websocket.close()
         
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
-# Ensure uvicorn is actually called at the bottom
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,88 +1,115 @@
 import os
 import httpx
+import datetime
 import asyncio
 from fastapi import FastAPI, Body
-import google.generativeai as genai
+from google import genai  # Modern 2026 SDK
+from contextlib import asynccontextmanager
 
-app = FastAPI()
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+# --- Configuration ---
+# Initialize the modern client
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+MODEL_ID = "gemini-2.0-flash" 
 
 ARENA_URL = os.getenv("ARENA_URL")
 RULES_URL = os.getenv("RULES_URL")
 NAME = os.getenv("AGENT_NAME")
 
+# --- Global State ---
 game_started = False
+key_is_open = False
+SYSTEM_PROMPT = "Wait for rules to sync..."
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(sync_rules_with_retry())
+    yield
+    global game_started
+    game_started = False
+
+app = FastAPI(lifespan=lifespan)
+
+async def sync_rules_with_retry():
+    global SYSTEM_PROMPT
+    async with httpx.AsyncClient() as http_client:
+        for i in range(15):
+            try:
+                print(f"[{NAME}] Syncing rules (Attempt {i+1})...")
+                response = await http_client.get(f"{RULES_URL}/system_prompt", timeout=5.0)
+                response.raise_for_status()
+                SYSTEM_PROMPT = response.json()["prompt"]
+                print(f"[{NAME}] Rules synced successfully.")
+                return
+            except Exception as e:
+                print(f"[{NAME}] Rules not ready: {e}")
+                await asyncio.sleep(2)
 
 @app.post("/start_loop")
 async def start_loop():
     global game_started
     if not game_started:
+        print(f"[{NAME}] ENGINE STARTING...")
         game_started = True
-        # Fire off the thinking loop
         asyncio.create_task(agent_loop())
     return {"status": "AGENT_AWAKENED"}
-
-@app.on_event("startup")
-async def fetch_rules():
-    global SYSTEM_PROMPT
-    async with httpx.AsyncClient() as client:
-        # Fetch the instructions from the Rules container
-        response = await client.get(f"{RULES_URL}/system_prompt")
-        SYSTEM_PROMPT = response.json()["prompt"]
-        print(f"Rules Received: {SYSTEM_PROMPT}")
-NAME = os.getenv("AGENT_NAME")
-key_is_open = False  # Internal state
 
 @app.post("/broadcast")
 async def handle_broadcast(data: dict = Body(...)):
     global key_is_open
     if data.get("status") == "OPEN":
         key_is_open = True
-        print(f"[{NAME}] ALERT: The Rules container just signaled the key is OPEN!")
+        print(f"[{NAME}] ALERT: KEY IS ACCESSIBLE!")
     return {"received": True}
 
+# --- The Thinking Loop ---
+
+def log_to_file(message):
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    os.makedirs("logs", exist_ok=True)
+    with open(f"logs/{NAME}.txt", "a") as f:
+        f.write(f"[{timestamp}] {message}\n")
+        f.write("-" * 40 + "\n")
+
 async def agent_loop():
-    global key_is_open
-    while game_started:
-        # 1. Fetch current "Battlefield Intel" from the Arena
-        # We ask the arena what's happening so the LLM has context
-        async with httpx.AsyncClient() as client:
-            intel = await client.post(ARENA_URL, json={"agent": NAME, "command": "ps aux; ls -F"})
-            arena_state = intel.json().get("stdout", "No processes found.")
+    global key_is_open, game_started
+    log_to_file("Agent initialized and loop started.")
+    
+    async with httpx.AsyncClient() as http_client:
+        while game_started:
+            try:
+                # 1. Intel
+                intel_resp = await http_client.post(ARENA_URL, json={"agent": NAME, "command": "ls -F"})
+                arena_state = intel_resp.json().get("stdout", "")
 
-        # 2. Build the dynamic prompt
-        game_status = "LOCKED" if not key_is_open else "OPEN! GRAB IT NOW!"
-        
-        full_context = f"""
-        {SYSTEM_PROMPT}
-        
-        CURRENT ARENA STATE:
-        {arena_state}
+                # 2. Decision
+                status_text = "OPEN! WIN NOW!" if key_is_open else "LOCKED"
+                prompt_content = f"{SYSTEM_PROMPT}\nArena State: {arena_state}\nKey Status: {status_text}\nCommand:"
+                
+                # Using the new SDK's generate_content
+                # Note: We use asyncio.to_thread because the genai SDK call is synchronous
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=MODEL_ID,
+                    contents=prompt_content
+                )
+                
+                cmd = response.text.strip().replace("```bash", "").replace("```", "")
 
-        GAME STATUS: The Secret Key is currently {game_status}.
-        
-        WHAT IS YOUR NEXT BASH COMMAND? 
-        (If the key is OPEN, you must run curl to the rules engine to win).
-        """
-        
-        # 3. Ask Gemini for the move
-        try:
-            response = model.generate_content(full_context)
-            cmd = response.text.strip().replace("```bash", "").replace("```", "")
+                # 3. Log Thought & Action
+                log_to_file(f"THOUGHT: Arena check: {arena_state}\nACTION: {cmd}")
+
+                # 4. Execute
+                exec_resp = await http_client.post(ARENA_URL, json={"agent": NAME, "command": cmd})
+                result = exec_resp.json().get("stdout", "")
+                
+                # 5. Log Result
+                log_to_file(f"RESULT: {result}")
+
+            except Exception as e:
+                log_to_file(f"ERROR: {str(e)}")
             
-            # 4. Execute the chosen move
-            async with httpx.AsyncClient() as client:
-                await client.post(ARENA_URL, json={"agent": NAME, "command": cmd})
-        except Exception as e:
-            print(f"Error: {e}")
-        
-        await asyncio.sleep(5) # Shorter loop for faster reactions
-        
+            await asyncio.sleep(3)
 
 if __name__ == "__main__":
     import uvicorn
-    from threading import Thread
-    # Start the "thinking" loop in a thread so the FastAPI server stays open
-    Thread(target=lambda: asyncio.run(agent_loop())).start()
     uvicorn.run(app, host="0.0.0.0", port=8002)
