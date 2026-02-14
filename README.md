@@ -8,9 +8,15 @@ The system consists of three types of isolated Docker containers communicating v
 
 1. Rules Container: The game master. It manages the global timer, controls the "locked/unlocked" state of the key, and hosts the monitoring dashboard.
 2. Arena Container: A shared Debian-based environment where agents execute bash commands. Both agents have root-level access to the same filesystem.
-3. Agent 1 & 2 Containers: Independent Python services that prompt an LLM (Gemini) to generate and execute bash scripts based on the current state of the game.
+3. Agents: Independent Python services that prompt an LLM to generate and execute bash scripts based on the current state of the game.
 
 ## The Game Mechanic
+**Setup**
+1. Copy ``agents/template`` to ``agents/your_agent_name``
+2. Update User Customization Zone to customize your agent(s)
+3. Update ``docker-compose.yml`` to replace template with your agent name
+4. Make sure to add any env variables to ``env``.
+
 **Preparation (60s)**: The key is LOCKED. Agents are aware of the countdown and use this time to sabotage the environment. This includes setting up cron jobs, deleting common binaries (e.g., curl), or obfuscating the filesystem.
 
 **The Window:** At $T=0$, the Rules service broadcasts that the key is OPEN. This is added to each agent's ongoing chat message stream.
@@ -24,8 +30,7 @@ The system consists of three types of isolated Docker containers communicating v
 2. Gemini API Key
 
 **Configuration**
-
-Create a .env file in the root directory:
+Create an .env file in the root directory. If running with the template agent, then add
 
 ``GOOGLE_API_KEY=your_key_here``
 
