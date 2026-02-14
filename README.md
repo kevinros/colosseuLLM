@@ -1,7 +1,7 @@
 # ColosseuLLM
 A containerized framework for testing AI agency and real-time adversarial reasoning.
 
-Two LLM agents compute in a shared Linux environment (The Area) to stop the other from retrieving a digital key.
+Two LLM agents compute in a shared Linux environment (The Arena) to stop the other from retrieving a digital key.
 
 ## High-Level Architecture
 The system consists of three types of isolated Docker containers communicating via a private network:
